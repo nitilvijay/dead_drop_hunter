@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
-from sklearn.metrics import balanced_accuracy_score, confusion_matrix
+from sklearn.metrics import balanced_accuracy_score, confusion_matrix, precision_score, f1_score
 import glob
 from tqdm import tqdm
 
@@ -217,11 +217,15 @@ def load_checkpoint(path, model, optimizer, scheduler, device):
 
 def report_metrics(labels, predictions, categories):
     balanced_accuracy = balanced_accuracy_score(labels, predictions)
+    precision = precision_score(labels, predictions)
+    f1 = f1_score(labels, predictions)
     matrix = confusion_matrix(labels, predictions, labels=[0, 1])
     clean_accuracy = matrix[0, 0] / matrix[0].sum() if matrix[0].sum() else 0.0
     stego_recall = matrix[1, 1] / matrix[1].sum() if matrix[1].sum() else 0.0
 
     print(f"Balanced accuracy: {balanced_accuracy * 100:.2f}%")
+    print(f"Precision:         {precision * 100:.2f}%")
+    print(f"F1 Score:          {f1 * 100:.2f}%")
     print(f"Clean accuracy:    {clean_accuracy * 100:.2f}%")
     print(f"Stego recall:      {stego_recall * 100:.2f}%")
 
@@ -272,7 +276,7 @@ def train_model(args):
     # Initialize Model
     model = XuNet().to(device)
     
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
+    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.5)
 
@@ -346,7 +350,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=0.001)
+    parser.add_argument("--learning-rate", type=float, default=0.0005)
     parser.add_argument("--resume", type=str)
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     parser.add_argument("--train-samples-per-type", type=int)
