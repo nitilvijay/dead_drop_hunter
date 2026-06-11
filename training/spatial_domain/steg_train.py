@@ -348,7 +348,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train XuNet steganalysis model")
     parser.add_argument("--device", choices=["auto", "xpu", "cpu"], default="auto")
     parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=0.0005)
     parser.add_argument("--resume", type=str)
