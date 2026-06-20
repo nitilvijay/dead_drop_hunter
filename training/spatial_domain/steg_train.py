@@ -4,6 +4,7 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
@@ -46,8 +47,27 @@ class SRMLayer(nn.Module):
     def forward(self, x):
         x = self.conv(x)
         x = torch.clamp(x, min=-2.0, max=2.0)
-        x = torch.abs(x)
         return x
+
+
+class GlobalCovariancePooling(nn.Module):
+    def __init__(self, eps=1e-8):
+        super(GlobalCovariancePooling, self).__init__()
+        self.eps = eps
+
+    def forward(self, x):
+        batch_size, channels, _, _ = x.shape
+        features = x.reshape(batch_size, channels, -1)
+        features = features - features.mean(dim=2, keepdim=True)
+
+        denom = max(features.size(2) - 1, 1)
+        covariance = torch.bmm(features, features.transpose(1, 2)) / denom
+
+        upper_indices = torch.triu_indices(channels, channels, device=x.device)
+        covariance = covariance[:, upper_indices[0], upper_indices[1]]
+        covariance = torch.sign(covariance) * torch.sqrt(torch.abs(covariance) + self.eps)
+        covariance = F.normalize(covariance, p=2, dim=1)
+        return covariance
 
 # 2. Xu-Net Model Architecture
 class XuNet(nn.Module):
@@ -55,46 +75,53 @@ class XuNet(nn.Module):
         super(XuNet, self).__init__()
         self.srm = SRMLayer()
         
-        # Layer 1: Conv 5x5, 32 channels, no pooling
+        # Layer 1: Conv 3x3, 32 channels, no pooling
         self.layer1 = nn.Sequential(
-            nn.Conv2d(30, 32, kernel_size=5, stride=1, padding=2),
+            nn.Conv2d(30, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
             nn.Tanh()
         )
         
-        # Layer 2: Conv 5x5, 32 channels, AvgPool
+        # Layer 2: Conv 3x3, 32 channels, AvgPool
         self.layer2 = nn.Sequential(
-            nn.Conv2d(32, 32, kernel_size=5, stride=1, padding=2),
+            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=5, stride=2, padding=2)
+            nn.Tanh(),  
         )
+        #Output=⌊Input+2×padding−kernel_size​⌋/stride +1
         
-        # Layer 3: Conv 5x5, 64 channels, AvgPool
+        # Layer 3: Conv 3x3, 64 channels, AvgPool
         self.layer3 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=5, stride=1, padding=2),
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=5, stride=2, padding=2)
+            nn.Tanh(),
+            nn.AvgPool2d(kernel_size=3, stride=1, padding=2)
         )
         
         # Layer 4: Conv 1x1, 128 channels, AvgPool
         self.layer4 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=1, stride=1),
             nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=5, stride=2, padding=2)
+            nn.Tanh(),
+            nn.AvgPool2d(kernel_size=3, stride=1, padding=2)
         )
         
         # Layer 5: Conv 1x1, 256 channels
         self.layer5 = nn.Sequential(
             nn.Conv2d(128, 256, kernel_size=1, stride=1),
             nn.BatchNorm2d(256),
-            nn.ReLU()
+            nn.Tanh()
         )
         
-        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(256, 2)
+        self.global_pool = GlobalCovariancePooling()
+        self.fc = nn.Sequential(
+            nn.Dropout(p=0.5),
+            nn.Linear(256 * (256 + 1) // 2, 1024),
+            nn.BatchNorm1d(1024),
+            nn.LeakyReLU(0.2),
+            nn.Dropout(p=0.3),
+            nn.Linear(1024, 2)
+        )
 
     def forward(self, x):
         x = self.srm(x)
@@ -104,7 +131,6 @@ class XuNet(nn.Module):
         x = self.layer4(x)
         x = self.layer5(x)
         x = self.global_pool(x)
-        x = x.view(x.size(0), -1)
         x = self.fc(x)
         return x
 
@@ -276,7 +302,7 @@ def train_model(args):
     # Initialize Model
     model = XuNet().to(device)
     
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-2)
     criterion = nn.CrossEntropyLoss()
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.5)
 
@@ -350,7 +376,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=0.0005)
+    parser.add_argument("--learning-rate", type=float, default=0.0008)
     parser.add_argument("--resume", type=str)
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     parser.add_argument("--train-samples-per-type", type=int)
