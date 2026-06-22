@@ -1,5 +1,5 @@
-import argparse
 import os
+import glob
 import random
 import numpy as np
 import torch
@@ -9,34 +9,30 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix, precision_score, f1_score
-import glob
 from tqdm import tqdm
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# INTEL CHECK: Safely attempt to pull in Intel Extension for PyTorch (IPEX)
+try:
+    import intel_extension_for_pytorch as ipex
+    HAS_IPEX = True
+except ImportError:
+    HAS_IPEX = False
+
+BASE_DIR = os.path.abspath(os.getcwd())
 STEGO_TYPES = ["LSB", "PVD", "WOW", "S-UNIWARD", "MiPOD"]
 
-
-def select_device(requested):
-    if requested == "xpu":
-        if not hasattr(torch, "xpu") or not torch.xpu.is_available():
-            raise RuntimeError(
-                "XPU was requested, but PyTorch cannot access an Intel GPU. "
-                "Check the Intel GPU driver and XPU runtime installation."
-            )
-        return torch.device("xpu")
-
-    if requested == "cpu":
-        return torch.device("cpu")
-
+def select_device():
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         return torch.device("xpu")
-    return torch.device("cpu")
+    raise RuntimeError(
+        "No Intel XPU detected! Check your Intel GPU drivers "
+        "or ensure you are inside an Intel Developer Cloud container."
+    )
 
 # 1. SRM Layer Definition
 class SRMLayer(nn.Module):
     def __init__(self):
         super(SRMLayer, self).__init__()
-        # Load kernels: (5, 5, 1, 30) -> need (30, 1, 5, 5)
         kernels = np.load(os.path.join(BASE_DIR, "SRM_Kernels1.npy"))
         kernels = np.transpose(kernels, (3, 2, 0, 1))
         
@@ -45,9 +41,7 @@ class SRMLayer(nn.Module):
         self.conv.weight.requires_grad = False
 
     def forward(self, x):
-        x = self.conv(x)
-        x = torch.clamp(x, min=-2.0, max=2.0)
-        return x
+        return torch.clamp(self.conv(x), min=-2.0, max=2.0)
 
 
 class GlobalCovariancePooling(nn.Module):
@@ -66,52 +60,20 @@ class GlobalCovariancePooling(nn.Module):
         upper_indices = torch.triu_indices(channels, channels, device=x.device)
         covariance = covariance[:, upper_indices[0], upper_indices[1]]
         covariance = torch.sign(covariance) * torch.sqrt(torch.abs(covariance) + self.eps)
-        covariance = F.normalize(covariance, p=2, dim=1)
-        return covariance
+        return F.normalize(covariance, p=2, dim=1)
 
-# 2. Xu-Net Model Architecture
+
+# 2. Xu-Net Architecture
 class XuNet(nn.Module):
     def __init__(self):
         super(XuNet, self).__init__()
         self.srm = SRMLayer()
         
-        # Layer 1: Conv 3x3, 32 channels, no pooling
-        self.layer1 = nn.Sequential(
-            nn.Conv2d(30, 32, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(32),
-            nn.Tanh()
-        )
-        
-        # Layer 2: Conv 3x3, 32 channels, AvgPool
-        self.layer2 = nn.Sequential(
-            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(32),
-            nn.Tanh(),  
-        )
-        #Output=⌊Input+2×padding−kernel_size​⌋/stride +1
-        
-        # Layer 3: Conv 3x3, 64 channels, AvgPool
-        self.layer3 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(64),
-            nn.Tanh(),
-            nn.AvgPool2d(kernel_size=3, stride=1, padding=2)
-        )
-        
-        # Layer 4: Conv 1x1, 128 channels, AvgPool
-        self.layer4 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=1, stride=1),
-            nn.BatchNorm2d(128),
-            nn.Tanh(),
-            nn.AvgPool2d(kernel_size=3, stride=1, padding=2)
-        )
-        
-        # Layer 5: Conv 1x1, 256 channels
-        self.layer5 = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=1, stride=1),
-            nn.BatchNorm2d(256),
-            nn.Tanh()
-        )
+        self.layer1 = nn.Sequential(nn.Conv2d(30, 32, 3, padding=1), nn.BatchNorm2d(32), nn.Tanh())
+        self.layer2 = nn.Sequential(nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.Tanh())
+        self.layer3 = nn.Sequential(nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.Tanh())
+        self.layer4 = nn.Sequential(nn.Conv2d(64, 128, 1), nn.BatchNorm2d(128), nn.Tanh())
+        self.layer5 = nn.Sequential(nn.Conv2d(128, 256, 1), nn.BatchNorm2d(256), nn.Tanh())
         
         self.global_pool = GlobalCovariancePooling()
         self.fc = nn.Sequential(
@@ -131,60 +93,43 @@ class XuNet(nn.Module):
         x = self.layer4(x)
         x = self.layer5(x)
         x = self.global_pool(x)
-        x = self.fc(x)
-        return x
+        return self.fc(x)
 
-# 3. Dataset and Dataloader
+
+# 3. Dataset (Shape safety check preserved)
 class StegoDataset(Dataset):
-    def __init__(
-        self,
-        root_dir,
-        split="train",
-        samples_per_stego_type=None,
-        clean_samples=None,
-    ):
+    def __init__(self, root_dir, split="train", samples_per_stego_type=None, clean_samples=None):
         self.root_dir = root_dir
         self.stego_types = STEGO_TYPES
         rng = np.random.default_rng()
         
-        # Gather all stego files
         self.stego_files = []
         self.stego_categories = []
         for stype in self.stego_types:
             path = os.path.join(root_dir, stype, "*.*")
             found = sorted(glob.glob(path))
             if samples_per_stego_type and len(found) > samples_per_stego_type:
-                indices = rng.choice(
-                    len(found), samples_per_stego_type, replace=False
-                )
+                indices = rng.choice(len(found), samples_per_stego_type, replace=False)
                 found = [found[i] for i in indices]
             self.stego_files.extend(found)
             self.stego_categories.extend([stype] * len(found))
             
-        # Gather clean files
         self.clean_files = sorted(glob.glob(os.path.join(root_dir, "clean_image", "*.*")))
         if clean_samples and len(self.clean_files) > clean_samples:
             indices = rng.choice(len(self.clean_files), clean_samples, replace=False)
             self.clean_files = [self.clean_files[i] for i in indices]
         
-        # Balance the dataset 50/50
         num_stego = len(self.stego_files)
         num_clean = len(self.clean_files)
         
         print(f"[{split}] Found {num_stego} Stego and {num_clean} Clean images.")
-
         if num_stego == 0 or num_clean == 0:
-            raise ValueError(
-                f"{root_dir} must contain both stego and clean images; "
-                f"found {num_stego} stego and {num_clean} clean."
-            )
+            raise ValueError(f"Found {num_stego} stego and {num_clean} clean images. Both required.")
         
         if num_clean > num_stego:
-            # Undersample clean
             indices = rng.choice(len(self.clean_files), num_stego, replace=False)
             self.clean_files = [self.clean_files[i] for i in indices]
         elif num_stego > num_clean:
-            # Undersample stego
             indices = rng.choice(len(self.stego_files), num_clean, replace=False)
             self.stego_files = [self.stego_files[i] for i in indices]
             self.stego_categories = [self.stego_categories[i] for i in indices]
@@ -192,8 +137,6 @@ class StegoDataset(Dataset):
         self.files = self.stego_files + self.clean_files
         self.labels = [1] * len(self.stego_files) + [0] * len(self.clean_files)
         self.categories = self.stego_categories + ["clean"] * len(self.clean_files)
-        
-        print(f"[{split}] Final balanced dataset size: {len(self.files)}")
 
     def __len__(self):
         return len(self.files)
@@ -204,28 +147,21 @@ class StegoDataset(Dataset):
             arr = np.array(img.convert("L"), dtype=np.float32)
 
         if arr.shape != (256, 256):
-            raise ValueError(f"Expected a 256x256 image, got {arr.shape}: {img_path}")
+            raise ValueError(f"Corrupted image shape {arr.shape} at: {img_path}")
 
         tensor = torch.from_numpy(arr).unsqueeze(0)
-        label = self.labels[idx]
-        return tensor, label, self.categories[idx]
+        return tensor, self.labels[idx], self.categories[idx]
 
 
-def save_checkpoint(path, model, optimizer, scheduler, epoch, best_accuracy, args):
-    checkpoint = {
+def save_checkpoint(path, model, optimizer, scheduler, epoch, best_accuracy, config):
+    torch.save({
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
         "best_balanced_accuracy": best_accuracy,
-        "config": vars(args),
-        "random_state": random.getstate(),
-        "numpy_random_state": np.random.get_state(),
-        "torch_random_state": torch.get_rng_state(),
-    }
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
-        checkpoint["xpu_random_state"] = torch.xpu.get_rng_state_all()
-    torch.save(checkpoint, path)
+        "config": config,
+    }, path)
 
 
 def load_checkpoint(path, model, optimizer, scheduler, device):
@@ -233,102 +169,89 @@ def load_checkpoint(path, model, optimizer, scheduler, device):
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-    random.setstate(checkpoint["random_state"])
-    np.random.set_state(checkpoint["numpy_random_state"])
-    torch.set_rng_state(checkpoint["torch_random_state"].cpu())
-    if device.type == "xpu" and "xpu_random_state" in checkpoint:
-        torch.xpu.set_rng_state_all(checkpoint["xpu_random_state"])
     return checkpoint["epoch"] + 1, checkpoint.get("best_balanced_accuracy", 0.0)
 
 
 def report_metrics(labels, predictions, categories):
-    balanced_accuracy = balanced_accuracy_score(labels, predictions)
-    precision = precision_score(labels, predictions)
-    f1 = f1_score(labels, predictions)
-    matrix = confusion_matrix(labels, predictions, labels=[0, 1])
-    clean_accuracy = matrix[0, 0] / matrix[0].sum() if matrix[0].sum() else 0.0
-    stego_recall = matrix[1, 1] / matrix[1].sum() if matrix[1].sum() else 0.0
-
-    print(f"Balanced accuracy: {balanced_accuracy * 100:.2f}%")
-    print(f"Precision:         {precision * 100:.2f}%")
-    print(f"F1 Score:          {f1 * 100:.2f}%")
-    print(f"Clean accuracy:    {clean_accuracy * 100:.2f}%")
-    print(f"Stego recall:      {stego_recall * 100:.2f}%")
-
-    for category in STEGO_TYPES:
-        category_indices = [i for i, value in enumerate(categories) if value == category]
-        if category_indices:
-            correct = sum(predictions[i] == 1 for i in category_indices)
-            accuracy = correct / len(category_indices)
-            print(f"{category:16s} recall: {accuracy * 100:.2f}% ({correct}/{len(category_indices)})")
-
-    return balanced_accuracy
-
-
-def train_model(args):
-    device = select_device(args.device)
-    device_name = torch.xpu.get_device_name(0) if device.type == "xpu" else "CPU"
-    print(f"Using device: {device} ({device_name})")
+    bal_acc = balanced_accuracy_score(labels, predictions)
+    print(f"Balanced accuracy: {bal_acc * 100:.2f}%")
+    print(f"Precision:         {precision_score(labels, predictions) * 100:.2f}%")
+    print(f"F1 Score:          {f1_score(labels, predictions) * 100:.2f}%")
     
-    # Load Datasets
+    cm = confusion_matrix(labels, predictions, labels=[0, 1])
+    print(f"Clean accuracy:    {(cm[0, 0] / cm[0].sum()) * 100:.2f}%")
+    print(f"Stego recall:      {(cm[1, 1] / cm[1].sum()) * 100:.2f}%")
+
+    for cat in STEGO_TYPES:
+        cat_idx = [i for i, v in enumerate(categories) if v == cat]
+        if cat_idx:
+            correct = sum(predictions[i] == 1 for i in cat_idx)
+            print(f"{cat:15s} recall: {(correct / len(cat_idx)) * 100:.2f}%")
+    return bal_acc
+
+
+# ---------------- INTEL TRAINING ENGINE ----------------
+def train_model(config):
+    device = select_device()
+    device_name = torch.xpu.get_device_name(0)
+    print(f"🚀 Bound to Intel Hardware: {device} ({device_name})")
+    
     train_dataset = StegoDataset(
-        os.path.join(BASE_DIR, "train_tiles"),
-        split="train",
-        samples_per_stego_type=args.train_samples_per_type,
-        clean_samples=args.train_clean_samples,
+        config["train_dir"], split="train",
+        samples_per_stego_type=config["train_samples_per_type"],
+        clean_samples=config["train_clean_samples"]
     )
     test_dataset = StegoDataset(
-        os.path.join(BASE_DIR, "test_tiles"),
-        split="test",
-        samples_per_stego_type=args.test_samples_per_type,
-        clean_samples=args.test_clean_samples,
+        config["test_dir"], split="test",
+        samples_per_stego_type=config["test_samples_per_type"],
+        clean_samples=config["test_clean_samples"]
     )
     
+    # VIP memory pinning active
     train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.workers,
-        persistent_workers=args.workers > 0,
+        train_dataset, batch_size=config["batch_size"], shuffle=True,
+        num_workers=config["workers"], pin_memory=True, persistent_workers=True
     )
     test_loader = DataLoader(
-        test_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.workers,
-        persistent_workers=args.workers > 0,
+        test_dataset, batch_size=config["batch_size"], shuffle=False,
+        num_workers=config["workers"], pin_memory=True, persistent_workers=True
     )
     
-    # Initialize Model
     model = XuNet().to(device)
-    
-    optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-2)
+    optimizer = optim.AdamW(model.parameters(), lr=config["learning_rate"], weight_decay=1e-2)
     criterion = nn.CrossEntropyLoss()
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.5)
 
-    start_epoch = 0
-    best_accuracy = 0.0
-    if args.resume:
-        start_epoch, best_accuracy = load_checkpoint(
-            args.resume, model, optimizer, scheduler, device
-        )
+    # --- INTEL SPEED HACK: Hardware Graph Compilation ---
+    if HAS_IPEX:
+        print("⚡ Fusing network layers via ipex.optimize()...")
+        model, optimizer = ipex.optimize(model, optimizer=optimizer, dtype=torch.bfloat16)
+
+    start_epoch, best_accuracy = 0, 0.0
+    if config["resume"]:
+        start_epoch, best_accuracy = load_checkpoint(config["resume"], model, optimizer, scheduler, device)
         print(f"Resumed from epoch {start_epoch}")
 
-    checkpoint_dir = os.path.join(BASE_DIR, args.checkpoint_dir)
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(config["checkpoint_dir"], exist_ok=True)
 
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(start_epoch, config["epochs"]):
         model.train()
-        print(f"\nEpoch {epoch+1}/{args.epochs}")
+        print(f"\nEpoch {epoch+1}/{config['epochs']}")
         
-        # Training loop with progress bar
         train_bar = tqdm(train_loader, desc="Training")
         for inputs, labels, _ in train_bar:
-            inputs, labels = inputs.to(device), labels.to(device)
+            
+            inputs = inputs.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
             
             optimizer.zero_grad(set_to_none=True)
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            
+            # --- INTEL SPEED HACK: Native BrainFloat16 Autocasting ---
+            # Pure 16-bit wide range math. Zero GradScalers required.
+            with torch.amp.autocast(device_type="xpu", dtype=torch.bfloat16):
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+            
             loss.backward()
             optimizer.step()
             
@@ -336,17 +259,18 @@ def train_model(args):
                 
         scheduler.step()
         
-        # Evaluation with progress bar
+        # --- Evaluation ---
         model.eval()
-        all_preds = []
-        all_labels = []
-        all_categories = []
+        all_preds, all_labels, all_categories = [], [], []
         
         eval_bar = tqdm(test_loader, desc="Evaluating")
         with torch.no_grad():
             for inputs, labels, categories in eval_bar:
-                inputs = inputs.to(device)
-                outputs = model(inputs)
+                inputs = inputs.to(device, non_blocking=True)
+                
+                with torch.amp.autocast(device_type="xpu", dtype=torch.bfloat16):
+                    outputs = model(inputs)
+                    
                 preds = torch.argmax(outputs, dim=1).cpu().numpy()
                 all_preds.extend(preds)
                 all_labels.extend(labels.numpy())
@@ -355,35 +279,29 @@ def train_model(args):
         balanced_accuracy = report_metrics(all_labels, all_preds, all_categories)
         best_accuracy = max(best_accuracy, balanced_accuracy)
 
-        checkpoint_path = os.path.join(
-            checkpoint_dir, f"xunet_epoch_{epoch + 1}.pth"
-        )
-        save_checkpoint(
-            checkpoint_path,
-            model,
-            optimizer,
-            scheduler,
-            epoch,
-            best_accuracy,
-            args,
-        )
-        print(f"Saved checkpoint: {checkpoint_path}")
+        ckpt_path = os.path.join(config["checkpoint_dir"], f"xunet_epoch_{epoch + 1}.pth")
+        save_checkpoint(ckpt_path, model, optimizer, scheduler, epoch, best_accuracy, config)
+        print(f"Saved secure XPU checkpoint -> {ckpt_path}")
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Train XuNet steganalysis model")
-    parser.add_argument("--device", choices=["auto", "xpu", "cpu"], default="auto")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=0.0008)
-    parser.add_argument("--resume", type=str)
-    parser.add_argument("--checkpoint-dir", default="checkpoints")
-    parser.add_argument("--train-samples-per-type", type=int)
-    parser.add_argument("--train-clean-samples", type=int)
-    parser.add_argument("--test-samples-per-type", type=int)
-    parser.add_argument("--test-clean-samples", type=int)
-    return parser.parse_args()
+# Execution Config (Update the directory paths to match your Intel workstation!)
+config = {
+    "epochs": 10,
+    "batch_size": 32,
+    "workers": 4,  # Intel workstations usually have 8-32 CPU cores; 4 is great here.
+    "learning_rate": 0.0008,
+    "resume": None, 
+
+    # CHANGE THESE 3 DIRECTORIES TO YOUR LOCAL MACHINE'S ACTUAL FOLDERS:
+    "train_dir": "./train_tiles",
+    "test_dir": "./test_tiles",
+    "checkpoint_dir": "./checkpoints", 
+
+    "train_samples_per_type": None,
+    "train_clean_samples": None,
+    "test_samples_per_type": None,
+    "test_clean_samples": None
+}
 
 if __name__ == "__main__":
-    train_model(parse_args())
+    train_model(config)
