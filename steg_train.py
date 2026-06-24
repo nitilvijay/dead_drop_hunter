@@ -11,23 +11,21 @@ from PIL import Image
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix, precision_score, f1_score
 from tqdm import tqdm
 
-# INTEL CHECK: Safely attempt to pull in Intel Extension for PyTorch (IPEX)
-try:
-    import intel_extension_for_pytorch as ipex
-    HAS_IPEX = True
-except ImportError:
-    HAS_IPEX = False
+def select_device(requested):
+    if requested == "xpu":
+        if not hasattr(torch, "xpu") or not torch.xpu.is_available():
+            raise RuntimeError(
+                "XPU was requested, but PyTorch cannot access an Intel GPU. "
+                "Check the Intel GPU driver and XPU runtime installation."
+            )
+        return torch.device("xpu")
 
-BASE_DIR = os.path.abspath(os.getcwd())
-STEGO_TYPES = ["LSB", "PVD", "WOW", "S-UNIWARD", "MiPOD"]
+    if requested == "cpu":
+        return torch.device("cpu")
 
-def select_device():
     if hasattr(torch, "xpu") and torch.xpu.is_available():
         return torch.device("xpu")
-    raise RuntimeError(
-        "No Intel XPU detected! Check your Intel GPU drivers "
-        "or ensure you are inside an Intel Developer Cloud container."
-    )
+    return torch.device("cpu")
 
 # 1. SRM Layer Definition
 class SRMLayer(nn.Module):
