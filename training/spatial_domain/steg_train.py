@@ -151,7 +151,9 @@ def train():
         batch_size=32,
         shuffle=True,
         num_workers=4,
-        pin_memory=True,
+        pin_memory=True, #Page locked memory, no need to worry about memory being paged out to disk, which can slow down data transfer to the GPU.
+        #Direct memory access (DMA) can be used to transfer data directly from the pinned memory to the GPU, bypassing the CPU and reducing latency.
+        #Useful for asynchronous data transfer, allowing the CPU to continue executing other tasks while the GPU is processing the data.
     )
     test_loader = DataLoader(
         StegoDataset("./test_tiles"),
@@ -183,7 +185,7 @@ def train():
             loss.backward() #computes gradients of the loss w.r.t. model parameters
             optimizer.step() #updates the model parameters based on the computed gradients
 
-        scheduler.step()
+        scheduler.step() #adjusts the learning rate based on the scheduler
 
         # --- Test Evaluation ---
         model.eval()
