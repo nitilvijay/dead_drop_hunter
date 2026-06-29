@@ -63,13 +63,13 @@ class XuNet(nn.Module):
             nn.Conv2d(32, 64, 3, padding=1),
             nn.BatchNorm2d(64),
             nn.Tanh(),
-            nn.AvgPool2d(kernel_size=3, stride=2, padding=2),
+
         )
         self.layer4 = nn.Sequential(
             nn.Conv2d(64, 128, 1),
             nn.BatchNorm2d(128),
             nn.Tanh(),
-            nn.AvgPool2d(kernel_size=3, stride=2, padding=2),
+
         )
         self.layer5 = nn.Sequential(
             nn.Conv2d(128, 256, 1), nn.BatchNorm2d(256), nn.Tanh()
