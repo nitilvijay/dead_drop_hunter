@@ -14,11 +14,14 @@ STEGO_TYPES = ["LSB", "PVD", "WOW", "S-UNIWARD", "MiPOD"]
 
 class SRMLayer(nn.Module):
     """Applies fixed Spatial Rich Model (SRM) filters to extract noise residuals."""
+
     def __init__(self):
         super().__init__()
         kernels = np.load("SRM_Kernels1.npy").transpose(3, 2, 0, 1)
         self.conv = nn.Conv2d(1, 30, kernel_size=5, padding=2, bias=False)
-        self.conv.weight = nn.Parameter(torch.from_numpy(kernels).float(), requires_grad=False)
+        self.conv.weight = nn.Parameter(
+            torch.from_numpy(kernels).float(), requires_grad=False
+        )
 
     def forward(self, x):
         return torch.clamp(self.conv(x), min=-2.0, max=2.0)
@@ -26,13 +29,16 @@ class SRMLayer(nn.Module):
 
 class GlobalCovariancePooling(nn.Module):
     """Computes the second-order statistical relationships between feature maps."""
+
     def forward(self, x):
         batch, channels, _, _ = x.shape
         features = x.view(batch, channels, -1)
         features = features - features.mean(dim=2, keepdim=True)
 
         # Compute covariance matrix: (Batch, Channels, Channels)
-        cov = torch.bmm(features, features.transpose(1, 2)) / max(features.size(2) - 1, 1)
+        cov = torch.bmm(features, features.transpose(1, 2)) / max(
+            features.size(2) - 1, 1
+        )
 
         # Extract only the unique upper-triangular values to avoid redundant data
         upper_idx = torch.triu_indices(channels, channels, device=x.device)
@@ -47,17 +53,27 @@ class XuNet(nn.Module):
         super().__init__()
         self.srm = SRMLayer()
 
-        self.layer1 = nn.Sequential(nn.Conv2d(30, 32, 3, padding=1), nn.BatchNorm2d(32), nn.Tanh())
-        self.layer2 = nn.Sequential(nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.Tanh())
+        self.layer1 = nn.Sequential(
+            nn.Conv2d(30, 32, 3, padding=1), nn.BatchNorm2d(32), nn.Tanh()
+        )
+        self.layer2 = nn.Sequential(
+            nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.Tanh()
+        )
         self.layer3 = nn.Sequential(
-            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.Tanh(),
-            nn.AvgPool2d(kernel_size=3, stride=2, padding=2)
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.Tanh(),
+            nn.AvgPool2d(kernel_size=3, stride=2, padding=2),
         )
         self.layer4 = nn.Sequential(
-            nn.Conv2d(64, 128, 1), nn.BatchNorm2d(128), nn.Tanh(),
-            nn.AvgPool2d(kernel_size=3, stride=2, padding=2)
+            nn.Conv2d(64, 128, 1),
+            nn.BatchNorm2d(128),
+            nn.Tanh(),
+            nn.AvgPool2d(kernel_size=3, stride=2, padding=2),
         )
-        self.layer5 = nn.Sequential(nn.Conv2d(128, 256, 1), nn.BatchNorm2d(256), nn.Tanh())
+        self.layer5 = nn.Sequential(
+            nn.Conv2d(128, 256, 1), nn.BatchNorm2d(256), nn.Tanh()
+        )
 
         self.global_pool = GlobalCovariancePooling()
 
@@ -70,7 +86,7 @@ class XuNet(nn.Module):
             nn.BatchNorm1d(1024),
             nn.LeakyReLU(0.2),
             nn.Dropout(p=0.3),
-            nn.Linear(1024, 2)
+            nn.Linear(1024, 2),
         )
 
     def forward(self, x):
@@ -92,7 +108,8 @@ class StegoDataset(Dataset):
 
         # 1. Gather Clean Images (Class 0)
         clean_path = os.path.join(root_dir, "clean_image", "*.*")
-        for file_path in glob.glob(clean_path):
+
+        for file_path in glob.glob(clean_path): #glob.glob gives the full path of the file
             self.files.append(file_path)
             self.labels.append(0)
             self.types.append("clean")
@@ -108,9 +125,10 @@ class StegoDataset(Dataset):
     def __len__(self):
         return len(self.files)
 
-    def __getitem__(self, idx):
-        img = Image.open(self.files[idx])
-        img_arr = np.array(img, dtype=np.float32)
+    def __getitem__(self, idx): 
+        #Gets the index as input
+        img = Image.open(self.files[idx]) #accesses the file path and opens the img
+        img_arr = np.array(img, dtype=np.float32) #Conver to numpy array of float32
 
         # Convert (256, 256) array -> (1, 256, 256) PyTorch Image Tensor
         tensor = torch.from_numpy(img_arr).unsqueeze(0)
@@ -118,11 +136,30 @@ class StegoDataset(Dataset):
 
 
 def train():
-    device = torch.device("xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu")
+    device = torch.device(
+        "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu"
+    )
     print(f"Training backend selected: {device}")
-
-    train_loader = DataLoader(StegoDataset("./train_tiles"), batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
-    test_loader  = DataLoader(StegoDataset("./test_tiles"),  batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+    #StegoDataset inherits from the Dataset class, implements __len__ and __getitem__ methods, which are required for a PyTorch Dataset.
+    #Creates lists where image info are strored accordingly
+    #When Dataloader is called, it first creates an instance of the StegoDataset class, which initializes the dataset by scanning the specified root directory for clean and stego images. 
+    #It populates the files, labels, and types lists accordingly.
+    #Now dataloader uses these lists to create batches of data for training and testing. It handles shuffling, batching, and parallel data loading using multiple worker threads.
+    #Dataset is responsible for storing the image, and relative info (indexing) and Dataloader is responsible for loading the data in batches, shuffling, and parallel processing.
+    train_loader = DataLoader(
+        StegoDataset("./train_tiles"),
+        batch_size=32,
+        shuffle=True,
+        num_workers=4,
+        pin_memory=True,
+    )
+    test_loader = DataLoader(
+        StegoDataset("./test_tiles"),
+        batch_size=32,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=True,
+    )
 
     model = XuNet().to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.0008, weight_decay=1e-2)
@@ -132,19 +169,19 @@ def train():
     best_accuracy = 0.0
 
     for epoch in range(1, 11):
-        model.train()
+        model.train() #enable training mode, which activates dropout and batch normalization layers
         for images, labels, _ in tqdm(train_loader, desc=f"Epoch {epoch:02d} [Train]"):
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-            
-            optimizer.zero_grad()
 
+            optimizer.zero_grad()
+            #Autocast handles mixed precision, choosing between 16-bit and 32-bit floating point operations to optimize performance and memory usage.
             with torch.amp.autocast(device_type=device.type, dtype=torch.bfloat16):
                 predictions = model(images)
                 loss = criterion(predictions, labels)
 
-            loss.backward()
-            optimizer.step()
+            loss.backward() #computes gradients of the loss w.r.t. model parameters
+            optimizer.step() #updates the model parameters based on the computed gradients
 
         scheduler.step()
 
@@ -165,14 +202,18 @@ def train():
                 all_types.extend(img_types)
 
         bal_acc = balanced_accuracy_score(all_targets, all_preds)
-        print(f"\nResult Epoch {epoch:02d} | Balanced Acc: {bal_acc:.2%} | F1: {f1_score(all_targets, all_preds):.2%}")
+        print(
+            f"\nResult Epoch {epoch:02d} | Balanced Acc: {bal_acc:.2%} | F1: {f1_score(all_targets, all_preds):.2%}"
+        )
 
         # Print per-category breakdown
         for category in ["clean"] + STEGO_TYPES:
             cat_indices = [i for i, t in enumerate(all_types) if t == category]
             if cat_indices:
                 correct = sum(all_preds[i] == all_targets[i] for i in cat_indices)
-                print(f"  ├── {category:<12} accuracy: {correct / len(cat_indices):.1%}")
+                print(
+                    f"  ├── {category:<12} accuracy: {correct / len(cat_indices):.1%}"
+                )
 
         if bal_acc > best_accuracy:
             best_accuracy = bal_acc
