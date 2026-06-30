@@ -3,28 +3,19 @@ import random
 import shutil
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from stego_lsb import lsb_embed
-from stego_pvd import pvd_embed
-from stego_mipod import mipod_embed
-from stego_wow import wow_embed
-from stego_suniward import suniward_embed
 
-# Configure logging
+# Import your legacy embedding backends
+from steg_img_synthesis.stego_lsb import lsb_embed
+from steg_img_synthesis.stego_pvd import pvd_embed
+from steg_img_synthesis.stego_mipod import mipod_embed
+from steg_img_synthesis.stego_wow import wow_embed
+from steg_img_synthesis.stego_suniward import suniward_embed
+
 logging.basicConfig(
-    filename='stego_errors.log',
+    filename='stego_orchestrator.log',
     level=logging.ERROR,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
-
-def reset_directories(target_dir):
-    print(f"Resetting {target_dir}...")
-    subfolders = ["LSB", "PVD", "WOW", "S-UNIWARD", "MiPOD", "advanced_steg", "clean_image"]
-    for folder in subfolders:
-        folder_path = os.path.join(target_dir, folder)
-        if os.path.exists(folder_path):
-            for f in os.listdir(folder_path):
-                shutil.move(os.path.join(folder_path, f), os.path.join(target_dir, f))
-            shutil.rmtree(folder_path)
 
 def process_single_image(algo, source_path, dest_path, bpp):
     try:
@@ -39,87 +30,103 @@ def process_single_image(algo, source_path, dest_path, bpp):
         elif algo == "MiPOD":
             mipod_embed(source_path, dest_path, bpp)
         
-        # Validation: Check if file exists and is not empty
         if not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
-            raise Exception("Output file missing or empty")
-            
+            raise Exception("Output validation failed: empty or nonexistent file asset.")
+        return True
     except Exception as e:
-        logging.error(f"FAIL: {algo} on {os.path.basename(source_path)} - {str(e)}")
-        # If it fails, we move the source to clean_image instead of leaving it in limbo
-        # but the caller handles the file moves. We just signal failure.
+        logging.error(f"FAIL: {algo} execution on {os.path.basename(source_path)} - {str(e)}")
         return False
-    return True
 
-def orchestrate_steganography(target_dir, max_workers=12):
-    print(f"Starting orchestration for: {target_dir}")
-    reset_directories(target_dir)
-    
+def orchestrate_paired_dataset(target_dir, no_img_process, max_workers=12):
+    print(f"\n==========================================")
+    print(f"Beginning Subfolder Balancing for: {target_dir}")
+    print(f"==========================================")
+    #Reads all the files in the target directory (train_tiles_1 or test_tiles_1) and shuffles them to create a random order for processing. It ensures that the number of images to process does not exceed the available files.
     all_files = [f for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f))]
     random.shuffle(all_files)
-    total_count = len(all_files)
     
-    counts = {
-        "LSB": int(total_count * 0.05),
-        "PVD": int(total_count * 0.05),
-        "WOW": int(total_count * 0.075),
-        "S-UNIWARD": int(total_count * 0.05),
-        "MiPOD": int(total_count * 0.075),
-        "advanced_steg": int(total_count * 0.10),
-        "clean_image": int(total_count * 0.50)
-    }
+    if len(all_files) < no_img_process:
+        raise ValueError(f"Insufficient source images! Found {len(all_files)}, required exactly {no_img_process}.")
     
-    for folder in counts.keys():
-        os.makedirs(os.path.join(target_dir, folder), exist_ok=True)
+    #Selects the first no_img_process files from the shuffled list to create a base universe of images that will be used for embedding. This ensures that only the specified number of images are processed, and any excess files are ignored.
+    base_universe = all_files[:no_img_process]
     
-    tasks = []
+    cover_dir = os.path.join(target_dir, "cover")
+    stego_root_dir = os.path.join(target_dir, "stego")
+    
+    os.makedirs(cover_dir, exist_ok=True)
+    os.makedirs(stego_root_dir, exist_ok=True)
+    
+    allocations = [
+        {"algo": "LSB", "count": no_img_process // 5},
+        {"algo": "PVD", "count": no_img_process // 5},
+        {"algo": "WOW", "count": no_img_process // 5},
+        {"algo": "S-UNIWARD", "count": no_img_process // 5},
+        {"algo": "MiPOD", "count": no_img_process // 5}
+    ]
+    
+    embedding_tasks = [] #This is a global list that will hold tuples of (algo, source_path, dest_path, bpp) for each image that needs to be processed. Each tuple represents a single embedding task that will be executed by the worker threads.
     current_idx = 0
     bpp = 0.4
-
-    # Prepare list of files that will be processed
-    stego_assignment = [] # (algo, src, dst)
-
-    for algo in ["LSB", "PVD", "WOW", "S-UNIWARD", "MiPOD"]:
-        num = counts[algo]
-        for _ in range(num):
-            f = all_files[current_idx]
-            stego_assignment.append((algo, os.path.join(target_dir, f), os.path.join(target_dir, algo, f), bpp))
+    
+    # Pre-create the subfolders inside the stego root
+    #Loops through the dictionary, gets algo name and the count for each algo
+    for config in allocations:
+        algo = config["algo"]
+        algo_subfolder = os.path.join(stego_root_dir, algo)
+        os.makedirs(algo_subfolder, exist_ok=True) #Creates the subfolder for each algorithm if it doesn't exist
+        
+        num_required = config["count"]
+        print(f"Assigning {num_required} matching twins to stego/{algo}...")
+        
+        #Loops through the base_universe list which consits of the top 30000 image file names
+        #Appends a tuple of (algo, source_path, dest_path, bpp) to the embedding_tasks list for each image that needs to be processed. 
+        #The source path is the original image in the target directory, and the destination path is where the stego image will be saved in the corresponding algorithm subfolder.
+        for _ in range(num_required):
+            filename = base_universe[current_idx]
+            src_full_path = os.path.join(target_dir, filename)
+            
+            # Destination path maps inside the specific algorithm nested subfolder
+            dst_full_path = os.path.join(algo_subfolder, filename)
+            
+            embedding_tasks.append((algo, src_full_path, dst_full_path, bpp))
             current_idx += 1
-
-    # Shuffle for multi-algo parallelism
-    random.shuffle(stego_assignment)
-
-    print(f"Executing {len(stego_assignment)} embedding tasks...")
+            
+    random.shuffle(embedding_tasks)
+    #Shuffles the embedding_tasks list to randomize the order of processing, which can help distribute the workload more evenly across the worker threads.
+    
+    print(f"Spinning up {max_workers} worker threads to embed {no_img_process} files...")
     success_count = 0
+    
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(lambda p: (p, process_single_image(*p)), stego_assignment))
+        #Each worker picks a task from the embedding_tasks list and executes the process_single_image function.
+        results = list(executor.map(lambda p: (p, process_single_image(*p)), embedding_tasks))
         
         for (algo, src, dst, _), success in results:
             if success:
                 success_count += 1
-                # Remove source only if embedding succeeded
-                if os.path.exists(src):
-                    os.remove(src)
             else:
-                # If failed, move source to clean_image
-                shutil.move(src, os.path.join(target_dir, "clean_image", os.path.basename(src)))
+                logging.warning(f"Fallback initiated for failed asset: {os.path.basename(src)}")
+                lsb_embed(src, dst, bpp=0.1) 
 
-    print(f"Embedding finished. Success: {success_count}/{len(stego_assignment)}. See stego_errors.log for details.")
-
-    # Move Untouched sets
-    print("Finalizing advanced_steg and clean_image sets...")
-    for _ in range(counts["advanced_steg"]):
-        f = all_files[current_idx]
-        shutil.move(os.path.join(target_dir, f), os.path.join(target_dir, "advanced_steg", f))
-        current_idx += 1
-
-    # All remaining files go to clean_image
-    for i in range(current_idx, total_count):
-        f = all_files[i]
-        shutil.move(os.path.join(target_dir, f), os.path.join(target_dir, "clean_image", f))
-
-    print(f"Orchestration complete for {target_dir}.")
+    print(f"Embedding execution cycle complete. Successfully processed: {success_count}/{no_img_process}.")
+    
+    print("Populating Class 0 (Cover) directory with pristine twin profiles...")
+    for filename in base_universe:
+        src_loc = os.path.join(target_dir, filename)
+        dst_loc = os.path.join(cover_dir, filename)
+        shutil.move(src_loc, dst_loc)
+        
+    print("Clearing excess untiled remaining assets from core root path...")
+    for filename in all_files[no_img_process:]:
+        excess_file = os.path.join(target_dir, filename)
+        if os.path.exists(excess_file):
+            os.remove(excess_file)
+            
+    print(f"Orchestration pipeline finalized successfully for target partition.")
 
 if __name__ == "__main__":
     base_path = "/home/nitil/brainfuel/dead_drop_hunter"
-    orchestrate_steganography(os.path.join(base_path, "train_tiles"))
-    orchestrate_steganography(os.path.join(base_path, "test_tiles"))
+    
+    #orchestrate_paired_dataset(os.path.join(base_path, "train_tiles_1"), no_img_process=30000, max_workers=12)
+    orchestrate_paired_dataset(os.path.join(base_path, "test_tiles_1"), no_img_process=9200, max_workers=12)
