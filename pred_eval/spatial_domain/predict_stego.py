@@ -6,14 +6,10 @@ import torch
 from PIL import Image
 
 # Assuming BASE_DIR and XuNet are imported from your custom package
-from nvidia_gpu_trian import BASE_DIR, XuNet
+from nvidia_gpu_train import BASE_DIR, XuNet
 
-# Default checkpoints for the ensemble
-DEFAULT_CHECKPOINTS = [
-    os.path.join(BASE_DIR, "saved_checkpoints_neo_1", "epoch_10.pth"),
-    os.path.join(BASE_DIR, "saved_checkpoints_neo_1", "epoch_06.pth"),
-    os.path.join(BASE_DIR, "saved_checkpoints_neo_1", "epoch_03.pth"),
-]
+# Default checkpoint for single-model inference
+DEFAULT_CHECKPOINT = os.path.join(BASE_DIR, "epoch_11.pth")
 VALID_EXTS = (".pgm", ".bmp", ".png", ".jpg", ".jpeg")
 
 
@@ -33,22 +29,20 @@ def select_prediction_device(requested):
     return torch.device("cpu")
 
 
-def load_ensemble_models(checkpoint_paths, device):
-    """Loads all models into a list for ensemble inference."""
-    models = []
-    for path in checkpoint_paths:
-        print(f"Loading checkpoint '{os.path.basename(path)}' into {device}...")
-        checkpoint = torch.load(path, map_location=device, weights_only=False)
-        state_dict = checkpoint.get("model_state_dict", checkpoint)
+def load_model(checkpoint_path, device):
+    """Load a single model checkpoint for inference."""
+    print(f"Loading checkpoint '{os.path.basename(checkpoint_path)}' into {device}...")
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
 
-        model = XuNet().to(device)
-        model.load_state_dict(state_dict)
-        model.eval()
-        models.append(model)
-    return models
+    model = XuNet().to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+    return model
 
 
 def load_image_tensor(image_path):
+    print(image_path)
     with Image.open(image_path) as img:
         arr = np.array(img, dtype=np.float32)
 
@@ -65,23 +59,13 @@ def load_image_tensor(image_path):
     return tensor.unsqueeze(0).unsqueeze(0)
 
 
-def predict_ensemble_batch(models, tensor_batch, device):
-    """Performs soft ensemble by averaging the probabilities of all models."""
-    all_probs = []
-    
-    # Move tensor to device once
+def predict_single_model_batch(model, tensor_batch, device):
+    """Run a single model on a batch and return class probabilities."""
     inputs = tensor_batch.to(device, non_blocking=True)
-    
     with torch.no_grad():
-        for model in models:
-            logits = model(inputs)
-            probs = torch.softmax(logits.float(), dim=1).cpu().numpy()
-            all_probs.append(probs)
-            #print(f"[Debug] Model {model.__class__.__name__} predicted probabilities: {probs}")
-            
-    # Compute the average probability across the axis of the models
-    avg_probs = np.mean(all_probs, axis=0)
-    return avg_probs
+        logits = model(inputs)
+        probs = torch.softmax(logits.float(), dim=1).cpu().numpy()
+    return probs
 
 
 def parse_args():
@@ -95,10 +79,10 @@ def parse_args():
     )
     # Accepts 3 checkpoint paths separated by spaces
     parser.add_argument(
-        "--checkpoints", 
-        nargs=3, 
-        default=DEFAULT_CHECKPOINTS,
-        help="Paths to exactly 3 model checkpoints separated by spaces."
+        "--checkpoint",
+        nargs="?",
+        default=DEFAULT_CHECKPOINT,
+        help="Path to a model checkpoint file to use for inference."
     )
     parser.add_argument(
         "--device", 
@@ -120,19 +104,18 @@ def main():
     target_path = args.target or input("Enter image or directory path: ").strip("'")
     target_path = os.path.abspath(os.path.expanduser(target_path))
     
-    # Resolve all checkpoint paths
-    checkpoint_paths = [os.path.abspath(os.path.expanduser(p)) for p in args.checkpoints]
+    # Resolve single checkpoint path
+    checkpoint_path = os.path.abspath(os.path.expanduser(args.checkpoint))
 
     if not os.path.exists(target_path):
         raise FileNotFoundError(f"Target not found: {target_path}")
-    for path in checkpoint_paths:
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"Checkpoint not found: {path}")
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     device = select_prediction_device(args.device)
     
-    # Load all 3 models upfront
-    models = load_ensemble_models(checkpoint_paths, device)
+    # Load the single model upfront
+    model = load_model(checkpoint_path, device)
 
     # Gather files
     files_to_scan = []
@@ -149,8 +132,8 @@ def main():
         print(f"No valid images found in {target_path}")
         return
 
-    print(f"\nScanning {len(files_to_scan)} file(s) using 3-Model Ensemble (threshold >= {args.threshold * 100:.1f}%)...\n")
-    print(f"{'Filename':<40} | {'Result':<8} | {'Avg Stego Prob':<15} | {'Time'}")
+    print(f"\nScanning {len(files_to_scan)} file(s) using single model (threshold >= {args.threshold * 100:.1f}%)...\n")
+    print(f"{'Filename':<40} | {'Result':<8} | {'Stego Prob':<15} | {'Time'}")
     print("-" * 80)
 
     stego_count = 0
@@ -160,9 +143,8 @@ def main():
         try:
             t0 = time.perf_counter()
             img_tensor = load_image_tensor(file_path)
-            
-            # Pass the array of models
-            probs = predict_ensemble_batch(models, img_tensor, device)[0]
+
+            probs = predict_single_model_batch(model, img_tensor, device)[0]
             elapsed = (time.perf_counter() - t0) * 1000
 
             clean_prob, stego_prob = probs[0], probs[1]
