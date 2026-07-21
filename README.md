@@ -1,91 +1,87 @@
 # Dead Drop Hunter
 
-## Overview
-Modern attacks such as this do not involve direct injection of malicious code into the subject's device. Even if the attacker tries to inject something through a phishing email, the malware will be flagged by the email platform or the system antivirus using techniques like signature matching.
+A CNN-based steganalysis system that scans images for hidden payloads before they land in production storage — designed to stop "dead drop" attacks that smuggle malicious code past enterprise firewalls.
 
-How do attackers make use of the dead drops?
+---
 
-Attackers embed the malicious code into images using advanced steganographic algorithms. The embeddings can be in the spatial domain or in the frequency domain.
+## The Threat Model: Dead Drops
 
-The image is then uploaded to a public facing S3 bucket, mostly the enterprise's own bucket which provides certain service.
+Modern cyberattacks frequently avoid direct injection of malicious code into a target device. Standard phishing payloads are easily flagged by email platforms and enterprise antivirus solutions using signature matching.
 
-This image is the dead drop. At this time, the image does no harm.
+To bypass this, attackers utilize **dead drops**:
 
-The attacker then injects a loader script into a device part of the enterprise's network. This script is not flagged as it is not malicious on its own.
+1. **Embedding** — Malicious code is embedded into benign-looking images using advanced steganographic algorithms (in both spatial and frequency domains).
+2. **Hosting** — The image is uploaded to a public-facing S3 bucket, often the enterprise's own infrastructure.
+3. **Execution** — A seemingly harmless loader script is injected into the enterprise network. Because it requests an image from an internal or trusted bucket, the firewall allows the traffic. The loader extracts the hidden payload from the dead drop image and executes the malicious code.
 
-This loader script downloads the image from the bucket. Conveniently this is not blocked by the enterprise's firewall as it is from the enterprise's own maintained bucket.
+**The Solution:** Dead Drop Hunter mitigates this risk by scanning incoming images for hidden embeddings *before* they are stored in the bucket, classifying them as either `clean` or `steg`.
 
-The loader knows how to extract the hidden code from the image, which then executes the malicious code.
+---
 
-The risk this kind of attack can be reduced if the incoming images to the bucket are scanned for embeddings. This model's main objective is to scan for any hidden embeddings in the incoming image and flag them as clean or steg. This process happens before the image is stored.
+## The Steganalysis Approach
 
-## Model
-This model is an implementation of CNN which accepts grayscale images of 256x256 dimension. However this does not follow the usual preprocessing and architecture of spatial based image classification.
+This model is a customized Convolutional Neural Network (CNN) that accepts 256×256 grayscale images.
 
-Standard CNNs are built to recognize objects, so they try to ignore tiny pixel noises. Steganalysis CNNs are built completely upside down to do the exact opposite: preserve and magnify weak modifications.
+Unlike standard computer vision CNNs built to recognize objects by *ignoring* tiny pixel noise, **steganalysis CNNs are built completely upside down**. Their objective is to preserve and magnify weak modifications and high-frequency noise caused by steganography.
 
-## System Architecture
+---
 
-### Dataset used
-BOSSbase_1.01, NRC-BMP-1500, CALTECH-BMP-1500. The latter two image datasets are converted to grayscale with [dataset_prep/convert_to_grayscale.py](dataset_prep/convert_to_grayscale.py).
+## System Architecture & Pipeline
 
-### Dataset preparation
-All the images are cropped into smaller tiles of dimension 256x256 with [dataset_prep/tile_dataset.py](dataset_prep/tile_dataset.py).
+### 1. Dataset Preparation
 
-Then the images are split into test and train with [dataset_prep/split_test_train.py](dataset_prep/split_test_train.py).
+The system utilizes images from **BOSSbase_1.01**, **NRC-BMP-1500**, and **CALTECH-BMP-1500**.
 
-Important point to note: all tiles from an image should be either in test or train. Some cannot be in train and the others in test.
+| Step | Description | Script |
+|---|---|---|
+| Grayscale Conversion | Converts the NRC and CALTECH datasets to grayscale | [`dataset_prep/convert_to_grayscale.py`](dataset_prep/convert_to_grayscale.py) |
+| Tiling | Crops images into 256×256 tiles | [`dataset_prep/tile_dataset.py`](dataset_prep/tile_dataset.py) |
+| Splitting | Splits the dataset into train/test sets | [`dataset_prep/split_test_train.py`](dataset_prep/split_test_train.py) |
+| Formatting *(optional)* | Compresses tiles to PNG | [`dataset_prep/compress_tiles_to_png.py`](dataset_prep/compress_tiles_to_png.py) |
+| Format Conversion | Converts BMP/PGM to JPG | [`convert_bmp_pgm_to_jpg.py`](convert_bmp_pgm_to_jpg.py) |
 
-If needed, the tiles can also be converted to PNG with [dataset_prep/compress_tiles_to_png.py](dataset_prep/compress_tiles_to_png.py), and the top-level converter [convert_bmp_pgm_to_jpg.py](convert_bmp_pgm_to_jpg.py) can be used for BMP/PGM to JPG conversion.
+> **Note:** To prevent data leakage, strict separation is enforced — all tiles originating from a single parent image belong exclusively to either the train set or the test set, never both.
 
-### Dataset synthesis (Image steganography synthesis)
-Embed the dataset with random values using the respective algo.
+### 2. Dataset Synthesis (Steganography)
 
-Algo used:
+The dataset is embedded with random hidden values using multiple algorithms across different domains.
 
-- Spatial domain - LSB, PVD, WOW, S-UNIWARD, MiPOD
-- Frequency domain - J-UNIWARD
+**Spatial Domain Algorithms** (LSB, PVD, WOW, S-UNIWARD, MiPOD)
 
-Relevant code files:
+* Managed by [`steg_img_synthesis/spatial_domain/stego_orchestrator.py`](steg_img_synthesis/spatial_domain/stego_orchestrator.py)
+* Individual implementations:
+  * [`stego_lsb.py`](steg_img_synthesis/spatial_domain/stego_lsb.py)
+  * [`stego_pvd.py`](steg_img_synthesis/spatial_domain/stego_pvd.py)
+  * [`stego_wow.py`](steg_img_synthesis/spatial_domain/stego_wow.py)
+  * [`stego_suniward.py`](steg_img_synthesis/spatial_domain/stego_suniward.py)
+  * [`stego_mipod.py`](steg_img_synthesis/spatial_domain/stego_mipod.py)
 
-- [steg_img_synthesis/spatial_domain/stego_orchestrator.py](steg_img_synthesis/spatial_domain/stego_orchestrator.py)
-- [steg_img_synthesis/spatial_domain/stego_lsb.py](steg_img_synthesis/spatial_domain/stego_lsb.py)
-- [steg_img_synthesis/spatial_domain/stego_pvd.py](steg_img_synthesis/spatial_domain/stego_pvd.py)
-- [steg_img_synthesis/spatial_domain/stego_wow.py](steg_img_synthesis/spatial_domain/stego_wow.py)
-- [steg_img_synthesis/spatial_domain/stego_suniward.py](steg_img_synthesis/spatial_domain/stego_suniward.py)
-- [steg_img_synthesis/spatial_domain/stego_mipod.py](steg_img_synthesis/spatial_domain/stego_mipod.py)
-- [steg_img_synthesis/frequency_domain/stego_jpeg_orchestrator.py](steg_img_synthesis/frequency_domain/stego_jpeg_orchestrator.py)
-- [steg_img_synthesis/frequency_domain/stego_juniward.py](steg_img_synthesis/frequency_domain/stego_juniward.py)
-- [steg_img_synthesis/frequency_domain/stego_jpeg_conseal.py](steg_img_synthesis/frequency_domain/stego_jpeg_conseal.py)
+**Frequency Domain Algorithms** (J-UNIWARD)
+
+* Managed by [`steg_img_synthesis/frequency_domain/stego_jpeg_orchestrator.py`](steg_img_synthesis/frequency_domain/stego_jpeg_orchestrator.py)
+* Implementations:
+  * [`stego_juniward.py`](steg_img_synthesis/frequency_domain/stego_juniward.py)
+  * [`stego_jpeg_conseal.py`](steg_img_synthesis/frequency_domain/stego_jpeg_conseal.py)
+
+---
 
 ## Model Architecture
-SRM - High pass filters.
 
-30 different high pass filters convolve with the image using `nn.Conv2d(1, 30, kernel_size=5, padding=2)` to result in channels of residual.
+The network utilizes a **Spatial Rich Model (SRM)** high-pass filter bank. 30 fixed high-pass filters convolve with the input image to isolate residuals — each output channel represents residuals computed by a different predictor.
 
-Every channel represents residuals computed by a different predictor.
-
-These residual values are truncated, clipped to [-2, 2], to avoid the large residuals which have resulted due to the sharp edges in the device.
+These residual values are aggressively clamped to `[-2.0, 2.0]` to eliminate large gradients caused by natural sharp edges in the image:
 
 ```python
 torch.clamp(self.conv(x), min=-2.0, max=2.0)
 ```
 
-The main spatial-domain model is implemented in [training/spatial_domain/steg_train.py](training/spatial_domain/steg_train.py).
+Batch Normalization is applied after every layer output to ensure gradients don't depend heavily on scale, preventing uneven learning.
 
-Batch Normalization takes place after every layer output, similar to the standard normalization we do before input to the first layer.
+Instead of standard Global Average Pooling (GAP), the model ends with **Global Covariance Pooling (GCP)**. GCP captures second-order statistics — co-occurrences and channel interactions — providing a far more expressive representation of image geometry and stego-texture.
 
-Gradients depend on scale. If scales differ, learning becomes uneven and inefficient.
+### Spatial Domain Model
 
-Global Covariance Pooling occurs at the last layer.
-
-While Global Average Pooling (GAP) is the standard industry go-to, Global Covariance Pooling (GCP) is a more advanced alternative designed to capture richer, higher-order statistical relationships.
-
-Second-order statistics: it captures the co-occurrence and correlations of different features. Channel interaction: it explicitly models the relationships between different channels, providing a far more expressive representation of the image geometry and texture.
-
-The frequency-domain model is implemented in [training/frequency_domain/nvidia_gpu_train_jpeg.py](training/frequency_domain/nvidia_gpu_train_jpeg.py).
-
-### Visual flow for the spatial model
+Implemented in [`training/spatial_domain/steg_train.py`](training/spatial_domain/steg_train.py). Optimizer: `AdamW`.
 
 ```mermaid
 flowchart TD
@@ -100,10 +96,12 @@ flowchart TD
     I --> J[Linear 1024]
     J --> K[BatchNorm + LeakyReLU]
     K --> L[Dropout]
-    L --> M[Linear 2 classes\nclean / stego]
+    L --> M[Linear 2 classes: clean / stego]
 ```
 
-### Visual flow for the JPEG model
+### Frequency Domain (JPEG) Model
+
+Implemented in [`training/frequency_domain/nvidia_gpu_train_jpeg.py`](training/frequency_domain/nvidia_gpu_train_jpeg.py). Optimizer: `Adam`.
 
 ```mermaid
 flowchart TD
@@ -112,58 +110,63 @@ flowchart TD
     C --> D[Channel reduction to 64]
     D --> E[Global Covariance Pooling]
     E --> F[Flatten]
-    F --> G[Linear 2 classes\nclean / stego]
+    F --> G[Linear 2 classes: clean / stego]
 ```
 
-## Optimizer and metrics
-Optimizer used is AdamW for the spatial-domain model, and Adam for the JPEG model.
+---
 
-Metrics used for evaluation:
+## Evaluation & Inference
 
-- Balanced Accuracy
-- Precision
-- F1 Score
-- Per-Algorithm Accuracy
+The evaluation logic and live prediction flows are managed in:
 
-The evaluation and prediction flow is implemented in [pred_eval/spatial_domain/predict_stego.py](pred_eval/spatial_domain/predict_stego.py) and [pred_eval/spatial_domain/eval_checkpoint.py](pred_eval/spatial_domain/eval_checkpoint.py).
+* [`pred_eval/spatial_domain/eval_checkpoint.py`](pred_eval/spatial_domain/eval_checkpoint.py)
+* [`pred_eval/spatial_domain/predict_stego.py`](pred_eval/spatial_domain/predict_stego.py)
 
-## Requirements
-The Python dependencies are listed in [requirements.txt](requirements.txt).
+**Primary metrics monitored:**
 
-Install them with:
+* Balanced Accuracy
+* Precision & F1 Score
+* Per-Algorithm Accuracy (to ensure the model doesn't overfit to a specific steganographic technique)
+
+**Sample run (Epoch 9/10, micro-batch 8 × 4 accum steps = effective batch 32):**
+
+```text
+Training:   100%|████████████████████████████████████████| 7500/7500 [21:04<00:00,  5.93it/s, loss=0.4812]
+Evaluating: 100%|████████████████████████████████████████| 2300/2300 [01:57<00:00, 19.62it/s]
+=============================================
+ OVERALL BALANCED ACCURACY: 75.70%
+ F1 Score:                  77.00%
+ Precision:                 73.08%
+---------------------------------------------
+ Clean Accuracy (Specificity): 70.03%  [6443/9200]
+ Stego Accuracy (Sensitivity): 81.36%  [7485/9200]
+---------------------------------------------
+   ├── LSB         accuracy:   95.00%  [1748/1840]
+   ├── PVD         accuracy:   99.40%  [1829/1840]
+   ├── WOW         accuracy:   71.85%  [1322/1840]
+   ├── S-UNIWARD   accuracy:   73.97%  [1361/1840]
+   ├── MiPOD       accuracy:   66.58%  [1225/1840]
+=============================================
+```
+
+---
+
+## Setup & Installation
+
+Clone the repository and install the required dependencies:
 
 ```bash
+git clone https://github.com/nitilvijay/dead_drop_hunter.git
+cd dead_drop_hunter
 pip install -r requirements.txt
 ```
 
-Packages used:
+**Core Dependencies:**
 
-- numpy
-- Pillow
-- scikit-learn
-- tqdm
-- torch
-- jpeglib
-- conseal
-
-## Sample training output
-```text
-Epoch 13/13 (micro-batch 8 x 4 accum steps = effective batch 32)
-Training: 100%|██████████████████████████████████████████████████████████████████████████████████| 7500/7500 [20:58<00:00,  5.96it/s, loss=0.4764]
-Evaluating: 100%|█████████████████████████████████████████████████████████████████████████████████████████████| 2300/2300 [01:52<00:00, 20.42it/s]
-
-=============================================
- OVERALL BALANCED ACCURACY: 76.69%
- F1 Score:                  77.15%
- Precision:                 75.66%
----------------------------------------------
- Clean Accuracy (Specificity): 74.67%  [6870/9200]
- Stego Accuracy (Sensitivity): 78.71%  [7241/9200]
----------------------------------------------
-   ├── LSB         accuracy:   90.22%  [1660/1840]
-   ├── PVD         accuracy:   98.91%  [1820/1840]
-   ├── WOW         accuracy:   68.42%  [1259/1840]
-   ├── S-UNIWARD   accuracy:   69.84%  [1285/1840]
-   ├── MiPOD       accuracy:   66.14%  [1217/1840]
-=============================================
-```
+* `torch`
+* `numpy`
+* `Pillow`
+* `scikit-learn`
+* `tqdm`
+* `jpeglib`
+* `conseal`
