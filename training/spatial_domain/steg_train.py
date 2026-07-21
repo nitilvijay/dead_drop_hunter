@@ -222,6 +222,16 @@ def train():
             torch.save(model.state_dict(), "best_model.pth")
             print("  └── [Saved new best checkpoint]")
 
+# def save_checkpoint(path, model, optimizer, scheduler, scaler, epoch, best_accuracy, config):
+#     torch.save({
+#         "epoch": epoch,
+#         "model_state_dict": model.state_dict(),
+#         "optimizer_state_dict": optimizer.state_dict(),
+#         "scheduler_state_dict": scheduler.state_dict(),
+#         "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
+#         "best_balanced_accuracy": best_accuracy,
+#         "config": config,
+#     }, path)
 
 if __name__ == "__main__":
     train()

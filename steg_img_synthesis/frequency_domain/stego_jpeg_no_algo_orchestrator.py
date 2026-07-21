@@ -1,5 +1,4 @@
 import os
-import random
 import shutil
 import logging
 from collections import defaultdict
@@ -35,79 +34,66 @@ def process_single_tile(algo, source_path, dest_path, alpha):
         return False
     return True
 
-def orchestrate_jpeg_steganography(target_dir, max_workers=12):
+def orchestrate_jpeg_steganography(target_dir, max_workers=14):
     print(f"Starting JPEG orchestration for: {target_dir}")
     reset_directories(target_dir)
-    
-    all_files = [f for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f)) and f.endswith(".jpg")]
-    
-    # Group tiles by source image
-    source_groups = defaultdict(list)
-    for f in all_files:
-        source_id = f.split('_tile')[0]
-        source_groups[source_id].append(f)
-    
-    source_ids = list(source_groups.keys())
-    random.shuffle(source_ids)
-    total_sources = len(source_ids)
-    
-    # Strict 50/50 Distribution based on source images
-    counts = {
-        "J-UNIWARD": int(total_sources * 0.50),
-        "clean_image": total_sources - int(total_sources * 0.50)
-    }
 
-    # Create folders
-    for folder in counts.keys():
-        os.makedirs(os.path.join(target_dir, folder), exist_ok=True)
-        
+    all_files = [
+        f for f in os.listdir(target_dir)
+        if os.path.isfile(os.path.join(target_dir, f))
+        and f.endswith(".jpg")
+    ]
+
+    # Create output folders
+    os.makedirs(os.path.join(target_dir, "J-UNIWARD"), exist_ok=True)
+    os.makedirs(os.path.join(target_dir, "clean_image"), exist_ok=True)
+
     embedding_tasks = []
-    current_idx = 0
     alpha = 0.4
-    
-    # 1. Stego Algos (Only J-UNIWARD)
-    for algo in ["J-UNIWARD"]:
-        num = counts[algo]
-        print(f"Assigning {num} source images to {algo}...")
-        for _ in range(num):
-            sid = source_ids[current_idx]
-            tiles = source_groups[sid]
-            for t in tiles:
-                embedding_tasks.append((algo, os.path.join(target_dir, t), os.path.join(target_dir, algo, t), alpha))
-            current_idx += 1
-            
-    # Execute embedding in parallel
-    print(f"Executing {len(embedding_tasks)} embedding tasks...")
-    
+
+    print(f"Preparing {len(all_files)} images...")
+
+    # Copy every image to clean_image and schedule embedding
+    for filename in all_files:
+        src = os.path.join(target_dir, filename)
+
+        clean_dst = os.path.join(target_dir, "clean_image", filename)
+        steg_dst = os.path.join(target_dir, "J-UNIWARD", filename)
+
+        # Keep an untouched clean copy
+        shutil.copy2(src, clean_dst)
+
+        # Schedule embedding
+        embedding_tasks.append(("J-UNIWARD", src, steg_dst, alpha))
+
+    print(f"Embedding {len(embedding_tasks)} images...")
+
     success_count = 0
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(lambda p: (p, process_single_tile(*p)), embedding_tasks))
-        
+        results = list(
+            executor.map(lambda p: (p, process_single_tile(*p)), embedding_tasks)
+        )
+
         for (algo, src, dst, _), success in results:
             if success:
                 success_count += 1
-                if os.path.exists(src):
-                    os.remove(src)
             else:
-                # Move source to clean_image folder if it fails
-                shutil.move(src, os.path.join(target_dir, "clean_image", os.path.basename(src)))
+                logging.error(f"Embedding failed for {os.path.basename(src)}")
 
-    print(f"JPEG Embedding finished. Success: {success_count}/{len(embedding_tasks)}")
-        
-    # 2. Clean Image
-    print(f"Moving remaining source images to clean_image...")
-    while current_idx < total_sources:
-        sid = source_ids[current_idx]
-        for t in source_groups[sid]:
-            src_path = os.path.join(target_dir, t)
-            if os.path.exists(src_path):
-                shutil.move(src_path, os.path.join(target_dir, "clean_image", t))
-        current_idx += 1
+    print(f"Embedding complete. Success: {success_count}/{len(embedding_tasks)}")
 
-    print(f"Orchestration complete for {target_dir}.")
+    # Remove originals from the root directory
+    print("Removing original images...")
+    for filename in all_files:
+        src = os.path.join(target_dir, filename)
+        if os.path.exists(src):
+            os.remove(src)
+
+    print(f"Finished processing {target_dir}")
 
 if __name__ == "__main__":
     base_path = "/home/nitil/brainfuel/dead_drop_hunter"
     # Process train and test
-    orchestrate_jpeg_steganography(os.path.join(base_path, "train_jpeg_no_algo"))
-    orchestrate_jpeg_steganography(os.path.join(base_path, "test_jpeg_no_algo"))
+    orchestrate_jpeg_steganography(os.path.join(base_path, "train_jpeg_one_algo"))
+    orchestrate_jpeg_steganography(os.path.join(base_path, "test_jpeg_one_algo"))
