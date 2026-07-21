@@ -12,7 +12,7 @@ import glob
 from tqdm import tqdm
 import jpeglib
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = "/home/nitil/brainfuel/dead_drop_hunter"
 STEGO_TYPES = ["J-UNIWARD"]
 
 def select_device(requested):
@@ -57,45 +57,74 @@ class PhaseUnfoldingLayer(nn.Module):
         
         return x
 
-# 2. Phase-Aware Model Architecture
+# 2. Global Covariance Pooling Layer
+class GlobalCovariancePooling(nn.Module):
+    def __init__(self, eps=1e-5):
+        super(GlobalCovariancePooling, self).__init__()
+        self.eps = eps
+
+    def forward(self, x):
+        B, C, H, W = x.size()
+        N = H * W
+        # Reshape to [B, C, H*W]
+        x = x.view(B, C, N)
+
+        # Compute mean along the spatial dimensions
+        mean = x.mean(dim=2, keepdim=True)
+        x_hat = x - mean
+
+        # Compute Covariance: (X * X^T) / (N - 1)
+        # Resulting shape: [B, C, C]
+        cov = torch.bmm(x_hat, x_hat.transpose(1, 2)) / (N - 1)
+
+        # Add a tiny epsilon to the diagonal for numerical stability
+        iden = torch.eye(C, device=x.device).view(1, C, C).repeat(B, 1, 1)
+        cov = cov + self.eps * iden
+
+        return cov
+
+
 class JpegStegModel(nn.Module):
     def __init__(self):
         super(JpegStegModel, self).__init__()
         self.unfold = PhaseUnfoldingLayer()
-        
-        # Layer 1: Learnable Conv2D (3x3, pad 1), 64 Filters
+
         self.layer1 = nn.Sequential(
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
         )
-        
-        # Layer 2: Learnable Conv2D + BatchNorm + ReLU, 128 Filters
+
         self.layer2 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU()
         )
-        
-        # Layer 3: Learnable Conv2D + BN + ReLU + AvgPool, 256 Filters (output 16x16)
+
         self.layer3 = nn.Sequential(
             nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(),
             nn.AvgPool2d(kernel_size=2, stride=2)
         )
-        
-        # Layer 4: Learnable Conv2D + BN + ReLU + AvgPool, 512 Filters (output 8x8)
+
         self.layer4 = nn.Sequential(
             nn.Conv2d(256, 512, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(512),
             nn.ReLU(),
             nn.AvgPool2d(kernel_size=2, stride=2)
         )
-        
-        # Layer 5: Global Average Pooling -> 1x1
-        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
-        
-        # Output Head: Fully Connected
-        self.fc = nn.Linear(512, 2)
+
+        # Reduce 512 channels down to 64 to avoid a massive 512x512 covariance matrix
+        self.conv_reduce = nn.Sequential(
+            nn.Conv2d(512, 64, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(64),
+            nn.ReLU()
+        )
+
+        # Global Covariance Pooling outputs a 64x64 matrix per sample
+        self.global_cov_pool = GlobalCovariancePooling()
+
+        # Output Head: Fully Connected (64 * 64 = 4096 inputs)
+        self.fc = nn.Linear(64 * 64, 2)
 
     def forward(self, x):
         x = self.unfold(x)
@@ -103,10 +132,13 @@ class JpegStegModel(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-        x = self.global_pool(x)
-        x = x.view(x.size(0), -1)
+        x = self.conv_reduce(x)
+        x = self.global_cov_pool(x)
+        x = x.view(x.size(0), -1) # Flatten the covariance matrix
         x = self.fc(x)
         return x
+
+
 
 # 3. Dataset and Dataloader
 class JpegStegoDataset(Dataset):
@@ -258,13 +290,13 @@ def train_model(args):
     
     # Load Datasets
     train_dataset = JpegStegoDataset(
-        os.path.join(BASE_DIR, "train_jpeg_no_algo"),
+        os.path.join(BASE_DIR, "train_jpeg_one_algo"),
         split="train",
         samples_per_stego_type=args.train_samples_per_type,
         clean_samples=args.train_clean_samples,
     )
     test_dataset = JpegStegoDataset(
-        os.path.join(BASE_DIR, "test_jpeg_no_algo"),
+        os.path.join(BASE_DIR, "test_jpeg_one_algo"),
         split="test",
         samples_per_stego_type=args.test_samples_per_type,
         clean_samples=args.test_clean_samples,
@@ -360,12 +392,12 @@ def train_model(args):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train JpegSteg model")
     parser.add_argument("--device", choices=["auto", "xpu", "cpu"], default="auto")
-    parser.add_argument("--epochs", type=int, default=8)
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--resume", type=str)
-    parser.add_argument("--checkpoint-dir", default="checkpoints_jpeg")
+    parser.add_argument("--checkpoint-dir", default="checkpoints_jpeg_1")
     parser.add_argument("--train-samples-per-type", type=int)
     parser.add_argument("--train-clean-samples", type=int)
     parser.add_argument("--test-samples-per-type", type=int)

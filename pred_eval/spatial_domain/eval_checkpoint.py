@@ -3,7 +3,7 @@ from PIL import Image
 import numpy as np
 import torch
 from tqdm import tqdm
-from nvidia_gpu_trian import BASE_DIR, XuNet
+from nvidia_gpu_train import XuNet
 from sklearn.metrics import (
     balanced_accuracy_score,
     precision_score,
@@ -11,7 +11,7 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
-checkpoint_folder = os.path.join(BASE_DIR, "saved_checkpoints_neo_1")
+checkpoint_folder = os.path.join("/home/nitil/brainfuel/dead_drop_hunter/", "saved_checkpoints_neo_2")
 SUB_FOLDER_NAMES = ["LSB", "PVD", "WOW", "S-UNIWARD", "MiPOD", "clean_image"]
 
 #select device
@@ -82,7 +82,7 @@ for _, _, files in os.walk(checkpoint_folder):
         print(f"Loaded model from: {epoch_file_name}")
         print(f"Checkpoint file: {file}")
         #Load images in batches from the test folder
-        test_folder_path = os.path.join(BASE_DIR, "test_tiles")
+        test_folder_path = os.path.join("/home/nitil/brainfuel/dead_drop_hunter/", "test_tiles_1")
         
         #For report metric function, we need to keep track of the labels, predictions and categories
         labels = []
