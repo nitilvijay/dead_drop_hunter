@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Hidden‑Data Detector</title>
+  <style>
+    body {font-family: Arial, sans-serif; max-width: 600px; margin: 2rem auto; padding: 0 1rem;}
+    h1 {text-align:center;}
+    #drop-zone {border:2px dashed #ccc; padding:2rem; text-align:center; margin:1rem 0; cursor:pointer;}
+    #drop-zone.dragover {border-color:#007bff; background:#eef;}
+    button {display:block; width:100%; padding:0.6rem; font-size:1rem; background:#007bff; color:#fff; border:none; cursor:pointer;}
+    button:disabled {background:#aaa; cursor:not-allowed;}
+    #status {margin-top:1rem; text-align:center; color:#333;}
+  </style>
+</head>
+<body>
+  <h1>Upload an image</h1>
+  <div id="drop-zone">Drag & drop an image here<br>or click to select</div>
+  <input type="file" id="file-input" accept="image/*" style="display:none;">
+  <button id="upload-btn" disabled>Upload</button>
+  <div id="status"></div>
+
+  <script>
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+    const uploadBtn = document.getElementById('upload-btn');
+    const statusDiv = document.getElementById('status');
+    const apiUrl = 'https://steg-hunter.nitilvijay.me/api/detect';
+    let selectedFile = null;
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', e => {
+      if (e.target.files.length) handleFile(e.target.files[0]);
+    });
+
+    function handleFile(file) {
+      if (!file.type.startsWith('image/')) {
+        alert('Please select an image file.');
+        return;
+      }
+      selectedFile = file;
+      dropZone.textContent = `Selected: ${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+      uploadBtn.disabled = false;
+      statusDiv.textContent = '';
+    }
+
+    async function upload() {
+      if (!selectedFile) return;
+      uploadBtn.disabled = true;
+      statusDiv.textContent = 'Uploading…';
+      const form = new FormData();
+      form.append('file', selectedFile);
+      try {
+        const response = await fetch(apiUrl, {method: 'POST', body: form});
+        if (!response.ok) throw new Error('Upload failed.');
+        statusDiv.textContent = 'Upload successful.';
+      } catch (err) {
+        statusDiv.textContent = 'Upload failed.';
+      } finally {
+        uploadBtn.disabled = false;
+      }
+    }
+
+    uploadBtn.addEventListener('click', upload);
+  </script>
+</body>
+</html>
